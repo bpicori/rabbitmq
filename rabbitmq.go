@@ -64,12 +64,13 @@ var (
 	rpcMapMutex    sync.RWMutex
 )
 
-//NewConnection returns the new connection object
+//NewConnection returns the new connection struct
 func NewConnection(name, uri string, exchange string) *Connection {
 	if c, ok := connectionPool[name]; ok {
 		return c
 	}
 	c := &Connection{
+		name: name,
 		exchange: exchange,
 		err:      make(chan error),
 		uri:      uri,
@@ -92,22 +93,24 @@ func (c *Connection) Connect() error {
 	}
 	go func() {
 		<-c.conn.NotifyClose(make(chan *amqp.Error)) //Listen to NotifyClose
-		c.err <- errors.New("connection closed")
+		c.err <- errors.New("connection closed") // TODO error type
 	}()
 	c.Channel, err = c.conn.Channel()
 	if err != nil {
 		return fmt.Errorf("error creating channel: %v", err)
 	}
-	if err := c.Channel.ExchangeDeclare(
-		c.exchange, // name
-		"direct",   // type
-		true,       // durable
-		false,      // auto-deleted
-		false,      // internal
-		false,      // noWait
-		nil,        // arguments
-	); err != nil {
-		return fmt.Errorf("error in Exchange Declare: %s", err)
+	if c.exchange != "" {
+		if err := c.Channel.ExchangeDeclare(
+			c.exchange, // name
+			"direct",   // type
+			true,       // durable
+			false,      // auto-deleted
+			false,      // internal
+			false,      // noWait
+			nil,        // arguments
+		); err != nil {
+			return fmt.Errorf("error in Exchange Declare: %s", err)
+		}
 	}
 	return nil
 }
@@ -122,8 +125,8 @@ func DefaultBindQueueOptions() BindQueueOptions {
 	}
 }
 
-// BindQueue with exchange
-func (c *Connection) BindQueue(queue string, options BindQueueOptions) error {
+// CreateQueue with exchange
+func (c *Connection) CreateQueue(queue string, options BindQueueOptions) error {
 	if _, err := c.Channel.QueueDeclare(queue, options.durable, options.autodelete, options.autodelete, options.nowait, nil); err != nil {
 		return fmt.Errorf("error in declaring the queue %s", err)
 	}
@@ -168,7 +171,7 @@ func (c *Connection) Rpc(message Message) (amqp.Delivery, error) {
 
 func (c *Connection) StartRpc(name string) error {
 	c.rpcQueueName = fmt.Sprintf("%s.%s", name, uuid.New().String())
-	if err := c.BindQueue(c.rpcQueueName, BindQueueOptions{
+	if err := c.CreateQueue(c.rpcQueueName, BindQueueOptions{
 		autodelete: true,
 		exclusive:  true,
 		durable:    true,
