@@ -17,4 +17,5 @@
 # vendor/
 .idea/
 docker-compose.yaml
+cmd/
 

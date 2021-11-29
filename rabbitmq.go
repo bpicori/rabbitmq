@@ -1,9 +1,8 @@
 /** Package rabbitmq TODO
-1. create errors variable
-2. handle content type header
+1. handle content type header
   * json
   * gzip
-3. create rpc handler function
+2. create rpc handler function
 */
 
 package rabbitmq
@@ -20,7 +19,7 @@ import (
 
 type RpcMap map[string]chan amqp.Delivery
 
-//MessageBody is the struct for the body passed in the AMQP message. The type will be set on the Request header
+//MessageBody the struct for the body passed in the AMQP message. The type will be set on the Request header.
 type MessageBody struct {
 	Data []byte
 }
@@ -33,7 +32,7 @@ type BindQueueOptions struct {
 	nowait     bool
 }
 
-//Message is the amqp request to publish
+//Message the amqp request to publish
 type Message struct {
 	Exchange      string
 	Queue         string
@@ -45,7 +44,7 @@ type Message struct {
 	Timeout       time.Duration
 }
 
-//Connection is the connection created
+//Connection the connection created
 type Connection struct {
 	name         string
 	uri          string
@@ -64,6 +63,11 @@ var (
 	rpcMapMutex    sync.RWMutex
 )
 
+var (
+	ErrConnectionClose = errors.New("connection closed")
+	ErrRpcTimeout = errors.New("rpc timeout")
+)
+
 //NewConnection returns the new connection struct
 func NewConnection(name, uri string, exchange string) *Connection {
 	if c, ok := connectionPool[name]; ok {
@@ -79,7 +83,7 @@ func NewConnection(name, uri string, exchange string) *Connection {
 	return c
 }
 
-//GetConnection returns the connection which was instantiated
+//GetConnection returns the connection
 func GetConnection(name string) *Connection {
 	return connectionPool[name]
 }
@@ -93,7 +97,7 @@ func (c *Connection) Connect() error {
 	}
 	go func() {
 		<-c.conn.NotifyClose(make(chan *amqp.Error)) //Listen to NotifyClose
-		c.err <- errors.New("connection closed") // TODO error type
+		c.err <- ErrConnectionClose
 	}()
 	c.Channel, err = c.conn.Channel()
 	if err != nil {
@@ -113,16 +117,6 @@ func (c *Connection) Connect() error {
 		}
 	}
 	return nil
-}
-
-// DefaultBindQueueOptions config
-func DefaultBindQueueOptions() BindQueueOptions {
-	return BindQueueOptions{
-		autodelete: false,
-		exclusive:  false,
-		durable:    true,
-		nowait:     false,
-	}
 }
 
 // CreateQueue with exchange
@@ -160,11 +154,14 @@ func (c *Connection) Rpc(message Message) (amqp.Delivery, error) {
 	rpcMapMutex.Unlock()
 	for {
 		select {
-		case <-ch:
-			d = <-ch
-			return d, nil
-		case <-timer.C:
-			return d, errors.New("rpc timeout")
+			case <-ch:
+				d = <-ch
+				return d, nil
+			case <-timer.C:
+				rpcMapMutex.Lock()
+				delete(rpcMap, d.CorrelationId)
+				rpcMapMutex.Unlock()
+				return d, ErrRpcTimeout
 		}
 	}
 }
@@ -188,16 +185,17 @@ func (c *Connection) StartRpc(name string) error {
 
 	go func(msgs <-chan amqp.Delivery) {
 		for d := range msgs {
-			fmt.Println("Received msg rpcStarted")
 			rpcMapMutex.Lock()
 			ch, ok := rpcMap[d.CorrelationId]
 			if ok {
 				ch <- d
 			}
+			delete(rpcMap, d.CorrelationId)
 			rpcMapMutex.Unlock()
 		}
 	}(msgs)
 	c.rpcStarted = true
+	fmt.Println("Rpc Service Started")
 	return nil
 }
 
@@ -210,15 +208,6 @@ func (c *Connection) Consume(queue string) (<-chan amqp.Delivery, error) {
 	return deliveries, nil
 }
 
-//HandleConsumedDeliveries handles the consumed deliveries from the queues. Should be called only for a consumer connection
-//func (c *Connection) HandleConsumedDeliveries(delivery <-chan amqp.Delivery, fn func(<-chan amqp.Delivery)) {
-//	for {
-//		go fn(delivery)
-//		if err := <-c.err; err != nil {
-//			panic("Rabbitmq connection error")
-//		}
-//	}
-//}
 
 // Publish message
 func (c *Connection) Publish(message Message) error {
